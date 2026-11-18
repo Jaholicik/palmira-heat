@@ -1,242 +1,269 @@
-// The story of Palmira Heat: five jobs for wheelman Rio Marino, run by the fixer Faro out of a
-// beachfront cafe. This module is the mission controller — it owns the chain's state machine
-// (briefing -> active -> done), the objectives, markers and timers, and it drives the world
-// only through the small api world.js hands it (spawn a car, set the heat, pay cash, banner a
-// message). The taxi side activity lives in world.js; everything story-shaped lives here.
-import { GRID } from './config.js';
-import { BEACH_ROAD_X, blockRect, roadX, roadY } from './city.js';
+// Faro's five jobs: the story chain that teaches Palmira one crime at a time. Each mission
+// is a tiny state machine that reads the world (never draws, never touches the browser):
+// begin() sets the scene and briefs Rio by phone, update() watches for the objective and
+// pays out. Getting busted or wasted aborts the running job — Faro always calls back.
+import { HEAT, PITCH } from './config.js';
+import { roadX, roadY } from './city.js';
+import { EVENT_CASH } from './world.js';
 
-export const MISSIONS = [
+export const EVENT_JINGLE = 512;
+
+const BAY_PAD = 8;
+
+function inBay(world, car) {
+  const bay = world.state.city.specials.respray.bay;
+  return car.x > bay.x - BAY_PAD && car.x < bay.x + bay.w + BAY_PAD && car.y > bay.y - BAY_PAD && car.y < bay.y + bay.h + BAY_PAD;
+}
+
+function removeCar(world, car) {
+  const cars = world.state.cars;
+  const at = cars.indexOf(car);
+  if (at >= 0) cars.splice(at, 1);
+}
+
+function sweepSpecial(world, tag) {
+  const cars = world.state.cars;
+  for (let i = cars.length - 1; i >= 0; i -= 1) {
+    if (cars[i].special === tag && cars[i].driver !== 'player') cars.splice(i, 1);
+  }
+}
+
+function pay(world, amount) {
+  world.state.cash += amount;
+  world.state.stats.earned += amount;
+}
+
+// ---------------------------------------------------------------------------
+// The five jobs
+// ---------------------------------------------------------------------------
+
+const MISSIONS = [
   {
-    id: 'boat',
+    id: 'comet',
     title: 'Fresh Off the Boat',
-    from: 'FARO',
     reward: 600,
-    intro: [
-      'FARO: Rio Marino. Heard you can drive. Heard you need money.',
-      'FARO: A teal Comet coupe is parked up in Marina Bay. Owner owes me.',
-      'FARO: Take it. Bring it to the Shine & Go garage. Quiet, yeah?',
-    ],
+    begin(world, run) {
+      sweepSpecial(world, 'comet');
+      run.car = world.spawnSpecialCar('sport', 'comet', roadX(9) - 37, roadY(4) + 150, Math.PI / 2);
+      run.car.color = '#2fb3a8';
+      run.car.roof = '#1f7d76';
+      run.stage = 'steal';
+      world.popup('FARO', 'Rio. You made it to Palmira. Good. Now listen — I need wheels with a pedigree.');
+      world.popup('FARO', 'A teal Comet S sits on the Neon Mile, keys in, owner careless. Take it. Bring it to Shine & Go.');
+    },
+    update(world, run) {
+      const s = world.state;
+      if (run.stage === 'steal') {
+        s.objective = { text: 'Steal the Comet S', x: run.car.x, y: run.car.y };
+        if (s.player.car === run.car) {
+          run.stage = 'deliver';
+          world.popup('FARO', 'Good hands. Now the garage, and keep it pretty.');
+        }
+        return 'run';
+      }
+      const bay = s.city.specials.respray.bay;
+      s.objective = { text: 'Deliver the Comet to Shine & Go', x: bay.x + bay.w / 2, y: bay.y + bay.h / 2 };
+      if (s.player.car === run.car && inBay(world, run.car)) {
+        world.exitCar();
+        removeCar(world, run.car);
+        return 'done';
+      }
+      return 'run';
+    },
+    abort(world, run) {
+      if (run.car && run.car.driver !== 'player') removeCar(world, run.car);
+    },
   },
   {
     id: 'package',
-    title: 'A Package for Sal',
-    from: 'FARO',
+    title: "Sal's Package",
     reward: 900,
-    intro: [
-      'FARO: Sal left a package by the Old Port gates. Small. Heavy. Do not open it.',
-      'FARO: Walk it over to the Costa Verde drop. The harbour cops have been restless,',
-      'FARO: so if the heat comes, it comes. Just get it there.',
-    ],
+    begin(world, run) {
+      run.point = { x: roadX(1) + 44, y: roadY(8) + 36 };
+      run.dest = { x: roadX(7) + 38, y: roadY(2) + 84 };
+      run.stage = 'pickup';
+      world.popup('FARO', 'Sal left a package in the Old Port, by the water stairs. Pick it up, carry it to Downtown.');
+      world.popup('FARO', 'One thing — the moment you touch it, every badge in Palmira will smell it. Drive like you mean it.');
+    },
+    update(world, run) {
+      const s = world.state;
+      const pp = world.playerPos();
+      if (run.stage === 'pickup') {
+        s.objective = { text: 'Pick up the package', x: run.point.x, y: run.point.y };
+        if (Math.hypot(pp.x - run.point.x, pp.y - run.point.y) < 34) {
+          run.stage = 'deliver';
+          world.setHeatAtLeast(HEAT.bands[1] + 10);
+          world.popup('FARO', 'That is the stuff. Now move — Downtown, the garage by the plaza.');
+        }
+        return 'run';
+      }
+      s.objective = { text: 'Deliver the package — Downtown', x: run.dest.x, y: run.dest.y };
+      if (Math.hypot(pp.x - run.dest.x, pp.y - run.dest.y) < 46) return 'done';
+      return 'run';
+    },
+    abort() {},
   },
   {
     id: 'beachrun',
     title: 'Beachfront Run',
-    from: 'FARO',
     reward: 750,
-    intro: [
-      'FARO: A casino man wants to see if you are fast or just lucky.',
-      'FARO: Five flags down the beachfront avenue, against the clock.',
-      'FARO: Any car you like. Try not to redecorate it.',
-    ],
+    begin(world, run) {
+      run.points = [1, 3, 5, 7, 9].map((j) => ({ x: roadX(13), y: roadY(j) }));
+      run.next = 0;
+      run.timeLeft = 85;
+      world.popup('FARO', 'A friend bets you cannot run the whole beachfront before the light changes. Five gates. Prove him poor.');
+    },
+    update(world, run, dt) {
+      const s = world.state;
+      run.timeLeft -= dt;
+      const target = run.points[run.next];
+      s.objective = { text: `Beachfront Run — gate ${run.next + 1} of 5 · ${Math.max(0, Math.ceil(run.timeLeft))}s`, x: target.x, y: target.y };
+      if (run.timeLeft <= 0) {
+        world.popup('FARO', 'Too slow, the bet is lost. We go again when you are ready.');
+        return 'fail';
+      }
+      const pp = world.playerPos();
+      if (s.player.car && Math.hypot(pp.x - target.x, pp.y - target.y) < 58) {
+        run.next += 1;
+        if (run.next >= run.points.length) return 'done';
+        world.popup('FARO', `Gate ${run.next} of 5. Keep her singing.`);
+      }
+      return 'run';
+    },
+    abort() {},
   },
   {
     id: 'cooloff',
     title: 'Cool Off',
-    from: 'FARO',
     reward: 1000,
-    intro: [
-      'FARO: You are getting famous, Rio. Three stars famous.',
-      'FARO: The PD wants a word. You are not going to give them one.',
-      'FARO: Break their line of sight and stay gone until it blows over.',
-    ],
+    begin(world, run) {
+      world.setHeatAtLeast(HEAT.bands[2] + 30);
+      world.popup('FARO', 'Change of plans — the last drop went loud and the whole PD is lit up. Shake them, Rio. All of them.');
+      run.stage = 'escape';
+    },
+    update(world, run) {
+      const s = world.state;
+      s.objective = { text: 'Lose the heat — break their line of sight', x: null, y: null };
+      if (s.stars === 0 && s.heat <= 0) return 'done';
+      return 'run';
+    },
+    abort() {},
   },
   {
     id: 'pier9',
     title: 'The Pier 9 Job',
-    from: 'FARO',
     reward: 2500,
-    intro: [
-      'FARO: Last one, and it is the big one. A grey Bulwark armoured van,',
-      'FARO: parked off Solana Avenue with a fortune in the back.',
-      'FARO: Take it to my crew at Pier 9. Every cop in Palmira will come. Let them.',
-    ],
+    begin(world, run) {
+      sweepSpecial(world, 'van');
+      const bankX = 7 * PITCH + PITCH / 2;
+      run.car = world.spawnSpecialCar('armored', 'van', bankX, roadY(4), 0);
+      run.stage = 'steal';
+      world.popup('FARO', 'Last job, biggest teeth. A Bastion armored van idles outside Palma Bank, full of other people\'s money.');
+      world.popup('FARO', 'Take it to Pier 9 at the docks. The whole city will try to stop you. That is why it pays.');
+    },
+    update(world, run) {
+      const s = world.state;
+      const pier = s.city.specials.pier.point;
+      if (run.stage === 'steal') {
+        s.objective = { text: 'Steal the armored van', x: run.car.x, y: run.car.y };
+        if (s.player.car === run.car) {
+          run.stage = 'deliver';
+          world.setHeatAtLeast(HEAT.bands[2] + 20);
+          world.popup('FARO', 'Everybody knows that van now. Run, Rio — Pier 9!');
+        }
+        return 'run';
+      }
+      s.objective = { text: 'Deliver the van — Pier 9', x: pier.x, y: pier.y };
+      const pp = world.playerPos();
+      if (s.player.car === run.car && Math.hypot(pp.x - pier.x, pp.y - pier.y) < 62) {
+        world.exitCar();
+        removeCar(world, run.car);
+        return 'done';
+      }
+      return 'run';
+    },
+    abort(world, run) {
+      if (run.car && run.car.driver !== 'player') removeCar(world, run.car);
+    },
   },
 ];
 
-const CHECKPOINTS = [0, 2, 4, 6, 8].map((j) => ({ x: BEACH_ROAD_X, y: roadY(j) + 30 }));
+// ---------------------------------------------------------------------------
+// The manager
+// ---------------------------------------------------------------------------
 
-/**
- * Create the story controller. `api` is world.js's bridge: { state, city, random,
- * spawnSpecialCar(x, y, angle, opts), setStars(n), addHeat(n), pay(n), banner(text, sub),
- * sparkle(x, y) }.
- */
-export function createStory(api) {
-  const s = api.state;
-  const story = {
-    /** Index of the current (or next) mission; == MISSIONS.length when the story is done. */
-    index: 0,
-    active: false,
-    complete: false,
-    phase: '',
-    objective: '',
-    marker: null,
-    timer: 0,
-    checkpoint: 0,
-    targetCar: null,
-    hasPackage: false,
+export function createMissions() {
+  let index = 0;
+  let complete = false;
+  let run = null; // { def, ...scratch }
+  let gapTimer = 1.6;
+
+  function startNext(world) {
+    const def = MISSIONS[index];
+    run = { def };
+    def.begin(world, run);
+  }
+
+  function update(world, dt) {
+    let events = 0;
+    let completed = false;
+    const s = world.state;
+    if (complete) {
+      if (s.objective && s.objective.mission) s.objective = null;
+      return { events, completed };
+    }
+    if (!run) {
+      gapTimer -= dt;
+      if (s.objective && s.objective.mission) s.objective = null;
+      if (gapTimer <= 0 && index < MISSIONS.length) startNext(world);
+      return { events, completed };
+    }
+    const result = run.def.update(world, run, dt);
+    if (s.objective) s.objective.mission = true;
+    if (result === 'done') {
+      pay(world, run.def.reward);
+      world.banner('MISSION COMPLETE', `${run.def.title} — +$${run.def.reward}`);
+      events |= EVENT_CASH | EVENT_JINGLE;
+      completed = true;
+      index += 1;
+      run = null;
+      gapTimer = 3.2;
+      s.objective = null;
+      if (index >= MISSIONS.length) {
+        complete = true;
+        world.banner('STORY COMPLETE', 'Palmira is yours, Rio — free roam');
+        world.popup('FARO', 'That is the set, Rio. The city knows your name now. Anything else is just appetite.');
+      }
+    } else if (result === 'fail') {
+      run = null;
+      gapTimer = 3.2;
+      s.objective = null;
+    }
+    return { events, completed };
+  }
+
+  function onGameOver(world) {
+    if (run) {
+      run.def.abort(world, run);
+      run = null;
+      gapTimer = 2.4;
+      world.state.objective = null;
+      world.popup('FARO', 'Forget it. Breathe. We run it again when the dust settles.');
+    }
+  }
+
+  return {
+    update,
+    onGameOver,
+    snapshot() { return { index, complete }; },
+    applySave(data) {
+      index = data.index ?? 0;
+      complete = !!data.complete;
+      run = null;
+      gapTimer = 2.2;
+    },
+    get complete() { return complete; },
+    get index() { return index; },
+    get total() { return MISSIONS.length; },
   };
-  s.story = story;
-
-  function setObjective(text, marker) {
-    story.objective = text;
-    story.marker = marker;
-  }
-
-  function finish() {
-    const m = MISSIONS[story.index];
-    api.pay(m.reward);
-    api.banner('MISSION COMPLETE', `${m.title}  +$${m.reward}`);
-    api.jingle();
-    story.active = false;
-    story.targetCar = null;
-    story.hasPackage = false;
-    story.marker = null;
-    story.objective = '';
-    story.index += 1;
-    if (story.index >= MISSIONS.length) {
-      story.complete = true;
-      api.banner('STORY COMPLETE', 'Palmira is yours, Rio. Free roam — taxis and trouble remain.');
-    }
-    api.autosave();
-  }
-
-  function fail(reason) {
-    api.banner('MISSION FAILED', reason + ' — the job restarts.');
-    story.active = false;
-    story.targetCar = null;
-    story.hasPackage = false;
-    story.marker = null;
-    story.objective = '';
-    // Same index: start() will re-run it.
-  }
-
-  /** Begin mission `index` (defaults to the current one): spawn its props, set its first objective. */
-  function start(index = story.index) {
-    if (index >= MISSIONS.length) return;
-    story.index = index;
-    const m = MISSIONS[index];
-    story.active = true;
-    story.timer = 0;
-    story.checkpoint = 0;
-    story.hasPackage = false;
-    if (m.id === 'boat') {
-      const spot = { x: roadX(6), y: roadY(1) + 120 };
-      story.targetCar = api.spawnSpecialCar(spot.x, spot.y, Math.PI / 2, { kind: 'sport', color: '#1abc9c', tag: 'mission' });
-      story.phase = 'steal';
-      setObjective('Steal the teal Comet coupe in Marina Bay', { x: spot.x, y: spot.y, r: 60 });
-    } else if (m.id === 'package') {
-      const r = blockRect(1, 2);
-      story.phase = 'pickup';
-      setObjective('Pick up the package at the Old Port gates', { x: r.x + 20, y: r.y + GRID.block - 14, r: 34 });
-    } else if (m.id === 'beachrun') {
-      story.phase = 'run';
-      story.timer = 80;
-      const c = CHECKPOINTS[0];
-      setObjective('Beachfront Run: flag 1 of 5 — any car, against the clock', { x: c.x, y: c.y, r: 70 });
-    } else if (m.id === 'cooloff') {
-      story.phase = 'escape';
-      api.setStars(3);
-      setObjective('Lose the heat: break police sight until your stars are gone', null);
-    } else if (m.id === 'pier9') {
-      const spot = { x: roadX(8), y: roadY(3) + 120 };
-      story.targetCar = api.spawnSpecialCar(spot.x, spot.y, Math.PI / 2, { kind: 'van', color: '#5d6d7e', tag: 'mission', armored: true });
-      story.phase = 'steal';
-      setObjective('Steal the grey Bulwark armoured van off Solana Avenue', { x: spot.x, y: spot.y, r: 60 });
-    }
-  }
-
-  function playerAt(marker, r) {
-    const p = s.player;
-    const dx = p.x - marker.x;
-    const dy = p.y - marker.y;
-    return dx * dx + dy * dy < r * r;
-  }
-
-  function update(dt) {
-    if (!story.active) return;
-    const m = MISSIONS[story.index];
-    const p = s.player;
-    if (m.id === 'boat') {
-      if (story.phase === 'steal') {
-        if (story.targetCar && p.car === story.targetCar) {
-          story.phase = 'deliver';
-          const bay = api.city.respray.bay;
-          setObjective('Deliver the Comet to the Shine & Go garage', { x: bay.x + bay.w / 2, y: bay.y + bay.h / 2, r: 58 });
-          api.banner('FARO', 'Good hands. Now the garage, and keep it pretty.');
-        } else if (story.targetCar && story.targetCar.dead) {
-          fail('The Comet was wrecked.');
-        }
-      } else if (story.phase === 'deliver') {
-        const bay = api.city.respray.bay;
-        if (p.car === story.targetCar && playerAt({ x: bay.x + bay.w / 2, y: bay.y + bay.h / 2 }, 58)) finish();
-        else if (story.targetCar && story.targetCar.dead) fail('The Comet was wrecked.');
-      }
-    } else if (m.id === 'package') {
-      if (story.phase === 'pickup') {
-        if (!p.car && playerAt(story.marker, 34)) {
-          story.hasPackage = true;
-          story.phase = 'deliver';
-          api.setStars(2);
-          const r = blockRect(2, 8);
-          setObjective('Deliver the package to Costa Verde — the heat is on', { x: r.x + GRID.block - 20, y: r.y + 14, r: 36 });
-          api.banner('FARO', 'That is the one. Move, Rio — sirens already.');
-          api.sparkle(p.x, p.y);
-        }
-      } else if (story.phase === 'deliver') {
-        if (!p.car && playerAt(story.marker, 36)) finish();
-      }
-    } else if (m.id === 'beachrun') {
-      story.timer -= dt;
-      if (story.timer <= 0) {
-        fail('Out of time on the beachfront.');
-        return;
-      }
-      const c = CHECKPOINTS[story.checkpoint];
-      if (p.car && playerAt(c, 78)) {
-        story.checkpoint += 1;
-        api.sparkle(c.x, c.y);
-        api.pickupSound();
-        if (story.checkpoint >= CHECKPOINTS.length) {
-          const bonus = Math.round(story.timer) * 4;
-          api.pay(bonus);
-          api.banner('CHECKPOINT BONUS', `+$${bonus} for time to spare`);
-          finish();
-        } else {
-          const n = CHECKPOINTS[story.checkpoint];
-          setObjective(`Beachfront Run: flag ${story.checkpoint + 1} of 5 — ${Math.ceil(story.timer)}s left`, { x: n.x, y: n.y, r: 70 });
-        }
-      }
-    } else if (m.id === 'cooloff') {
-      if (s.wanted.stars === 0 && s.wanted.heat <= 0) finish();
-    } else if (m.id === 'pier9') {
-      if (story.phase === 'steal') {
-        if (story.targetCar && p.car === story.targetCar) {
-          story.phase = 'deliver';
-          api.setStars(3);
-          const a = api.city.docks.apron;
-          setObjective('Deliver the Bulwark to Pier 9 — every cop in Palmira is coming', { x: a.x, y: a.y, r: 64 });
-          api.banner('FARO', 'That van sings, Rio. Pier 9. Do not stop for anybody.');
-        } else if (story.targetCar && story.targetCar.dead) {
-          fail('The Bulwark was wrecked.');
-        }
-      } else if (story.phase === 'deliver') {
-        const a = api.city.docks.apron;
-        if (p.car === story.targetCar && playerAt(a, 64)) finish();
-        else if (story.targetCar && story.targetCar.dead) fail('The Bulwark was wrecked.');
-      }
-    }
-  }
-
-  return { story, start, update, MISSIONS };
 }

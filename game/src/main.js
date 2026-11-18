@@ -1,45 +1,46 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The
-// game moves between screens — title, how-to, mission briefing, play, paused, busted, wasted —
-// and this file owns the transitions, the save file in localStorage, and turning the world's
-// event flags into sound.
-//
-// ?seed=N fixes the city's growth and every random roll. ?shot=start|play|chase|end (with
-// &seed=N) stages that scene instead of running the loop, paints it twice and sets
-// window.__shotReady for a screenshot.
-import { SAVE_KEY, STEP } from './config.js';
+// Palmira Heat — boot and the live loop. Two modes share this file: the screenshot mode
+// (?shot=<name>&seed=N) stages a scene through the real simulation and renders it for
+// the capture, and the live game — title, play, pause, BUSTED and WASTED — running the
+// same fixed-step simulation behind the renderer, with sound and saving wired to its
+// events.
+import { BUST_FINE, SAVE_KEY, STEP, WASTED_FEE } from './config.js';
 import { createRandom } from './random.js';
 import {
-  createWorld, EV_BUSTED, EV_CASH, EV_CRIME, EV_ENTER, EV_HURT, EV_JINGLE, EV_OSHOT, EV_PICKUP, EV_SHOT, EV_WASTED,
+  createWorld, EVENT_BUSTED, EVENT_CASH, EVENT_CRIME, EVENT_ENTER_CAR, EVENT_OFFICER_SHOT,
+  EVENT_PICKUP, EVENT_SHOT, EVENT_WASTED,
 } from './world.js';
-import { ACTION_CONFIRM, ACTION_DOWN, ACTION_ENTER, ACTION_MUTE, ACTION_PAUSE, ACTION_UP, createInput } from './input.js';
+import { createMissions, EVENT_JINGLE } from './missions.js';
 import {
-  SCREEN_BRIEF, SCREEN_BUSTED, SCREEN_HELP, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WASTED, createRenderer,
+  createRenderer, SCREEN_BUSTED, SCREEN_HOWTO, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE,
+  SCREEN_WASTED,
 } from './render.js';
+import { ACTION_CONFIRM, ACTION_INTERACT, ACTION_MUTE, ACTION_PAUSE, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { stageShot } from './shots.js';
-import { MISSIONS } from './missions.js';
-
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
+const params = new URLSearchParams(window.location.search);
+const shotName = params.get('shot');
+const seedParam = Number.parseInt(params.get('seed') || '', 10);
+const seed = Number.isFinite(seedParam) ? seedParam : Math.floor(Math.random() * 1e9);
+
 const world = createWorld(createRandom(seed));
 const renderer = createRenderer(canvas);
 const audio = createAudio();
+let missions = createMissions();
+
+// ---------------------------------------------------------------------------
+// Saving: cash, story progress, position and stats, in localStorage.
+// ---------------------------------------------------------------------------
 
 function readSave() {
   try {
     const raw = window.localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    return data && typeof data === 'object' ? data : null;
+    if (!data || typeof data !== 'object' || !data.world || !data.missions) return null;
+    return data;
   } catch {
     return null;
   }
@@ -47,262 +48,259 @@ function readSave() {
 
 function writeSave() {
   try {
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify(world.serialize()));
-  } catch {
-    // Storage can be off (private windows): saving then lasts this visit only.
-  }
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
+      world: world.getSaveData(),
+      missions: missions.snapshot(),
+    }));
+  } catch { /* a full or blocked store is not worth a crash */ }
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  const ui = { items: ['New Game', 'How to Play'], index: 0, mouse: null, muted: false, title: '', lines: [], reward: 0 };
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, ui);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
+let hasSave = readSave() !== null;
 
-function runGame() {
+// ---------------------------------------------------------------------------
+// Screenshot mode: stage the scene, draw it twice, say when it is ready.
+// ---------------------------------------------------------------------------
+
+if (shotName) {
+  const scene = stageShot(shotName, world, missions);
+  const shotUi = shotName === 'start'
+    ? { menuItems: ['New Game', 'How to Play'], menuSelected: 0 }
+    : shotName === 'end'
+      ? { fineText: `Fine $${BUST_FINE} — released outside Palmira PD` }
+      : {};
+  const drawShot = () => renderer.draw(world.state, scene.screen, shotUi);
+  requestAnimationFrame(() => {
+    drawShot();
+    requestAnimationFrame(() => {
+      drawShot();
+      window.__shotReady = true;
+    });
+  });
+} else {
+  // -------------------------------------------------------------------------
+  // The live game.
+  // -------------------------------------------------------------------------
   const input = createInput(canvas);
   let screen = SCREEN_TITLE;
-  let menuIndex = 0;
-  let save = readSave();
-  let briefTimer = 0;
-  let lastStoryIndex = world.story.index;
-  let accumulator = 0;
+  let menuSelected = 0;
+  let fineText = '';
   let last = performance.now();
+  let acc = 0;
+  const MAX_FRAME = 0.25;
 
   function announce(message) {
-    status.textContent = message;
+    if (status) status.textContent = message;
   }
 
   function titleItems() {
-    const items = ['New Game'];
-    if (save) items.push('Continue');
-    items.push('How to Play');
+    const items = [{ label: 'New Game', act: 'new' }];
+    if (hasSave) items.push({ label: 'Continue', act: 'continue' });
+    items.push({ label: 'How to Play', act: 'howto' });
     return items;
   }
-  const PAUSE_ITEMS = ['Resume', 'Save Game', 'Restart Story', 'Title Screen'];
 
-  function showBrief() {
-    screen = SCREEN_BRIEF;
-    announce(`Job ${world.story.index + 1}: ${MISSIONS[world.story.index].title}.`);
+  function pauseItems() {
+    return [
+      { label: 'Resume', act: 'resume' },
+      { label: 'Save Game', act: 'save' },
+      { label: 'Restart Story', act: 'restart' },
+      { label: 'Quit to Title', act: 'title' },
+    ];
   }
 
-  function startNew() {
+  function newGame() {
     world.reset();
-    save = null;
-    lastStoryIndex = 0;
-    briefTimer = 0;
-    if (!world.story.complete && world.story.index < MISSIONS.length) showBrief();
-    else screen = SCREEN_PLAY;
+    missions = createMissions();
+    screen = SCREEN_PLAY;
+    menuSelected = 0;
+    announce('New game. Rio is back in Palmira.');
   }
 
-  function continueSave() {
+  function continueGame() {
+    const save = readSave();
     if (!save) return;
-    world.restore(save);
-    lastStoryIndex = world.story.index;
-    if (!world.story.complete && !world.story.active && world.story.index < MISSIONS.length) showBrief();
-    else screen = SCREEN_PLAY;
+    world.reset();
+    world.loadSaveData(save.world);
+    missions = createMissions();
+    missions.applySave(save.missions);
+    screen = SCREEN_PLAY;
+    menuSelected = 0;
+    announce('Welcome back to Palmira.');
   }
 
-  function confirm() {
-    if (screen === SCREEN_TITLE) {
-      const items = titleItems();
-      const pick = items[menuIndex];
-      if (pick === 'New Game') startNew();
-      else if (pick === 'Continue') continueSave();
-      else if (pick === 'How to Play') screen = SCREEN_HELP;
-    } else if (screen === SCREEN_HELP) {
-      screen = SCREEN_TITLE;
-      menuIndex = 0;
-    } else if (screen === SCREEN_BRIEF) {
-      world.startMission(world.story.index);
-      screen = SCREEN_PLAY;
-      announce(MISSIONS[world.story.index].title + '. ' + world.story.objective);
-    } else if (screen === SCREEN_PAUSED) {
-      const pick = PAUSE_ITEMS[menuIndex];
-      if (pick === 'Resume') screen = SCREEN_PLAY;
-      else if (pick === 'Save Game') {
-        writeSave();
-        save = readSave();
-        screen = SCREEN_PLAY;
-        announce('Saved.');
-      } else if (pick === 'Restart Story') startNew();
-      else if (pick === 'Title Screen') {
-        screen = SCREEN_TITLE;
-        menuIndex = 0;
-      }
-    } else if (screen === SCREEN_BUSTED) {
-      world.respawnBusted();
-      screen = SCREEN_PLAY;
-    } else if (screen === SCREEN_WASTED) {
-      world.respawnWasted();
-      screen = SCREEN_PLAY;
-    }
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_MUTE) audio.setMuted(!audio.isMuted());
-    if (screen === SCREEN_TITLE || screen === SCREEN_PAUSED) {
-      const count = screen === SCREEN_TITLE ? titleItems().length : PAUSE_ITEMS.length;
-      if (actions & ACTION_UP) menuIndex = (menuIndex + count - 1) % count;
-      if (actions & ACTION_DOWN) menuIndex = (menuIndex + 1) % count;
-    }
-    if (actions & ACTION_CONFIRM) {
-      audio.unlock();
-      confirm();
-      return 0;
-    }
-    if (actions & ACTION_PAUSE) {
-      if (screen === SCREEN_PLAY) {
-        screen = SCREEN_PAUSED;
-        menuIndex = 0;
-        announce('Paused.');
-      } else if (screen === SCREEN_PAUSED) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      } else if (screen === SCREEN_HELP) {
-        screen = SCREEN_TITLE;
-      }
-      return 0;
-    }
-    return actions;
-  }
-
-  function buildInput(actions, firstStep) {
-    const cam = renderer.getCamera();
-    const scale = renderer.getView().scale || 1;
-    const mouse = input.mousePos();
-    const p = world.state.player;
-    let aimAngle = p.angle;
-    if (mouse.x !== 0 || mouse.y !== 0) {
-      // The camera zooms with speed, so screen pixels are world units divided by the scale.
-      aimAngle = Math.atan2(mouse.y / scale - (p.y - cam.y), mouse.x / scale - (p.x - cam.x));
-    }
-    return {
-      mx: input.axisX(),
-      my: input.axisY(),
-      run: input.run(),
-      throttle: input.throttle(),
-      steer: input.steer(),
-      enterPressed: firstStep && (actions & ACTION_ENTER) !== 0,
-      fire: input.firing(),
-      aimAngle,
-    };
-  }
-
-  const BLANK = { mx: 0, my: 0, run: false, throttle: 0, steer: 0, enterPressed: false, fire: false, aimAngle: 0 };
-
-  function playEvents(events) {
-    if (events & EV_SHOT) audio.gunshot();
-    if (events & EV_OSHOT) audio.officerShot();
-    if (events & EV_HURT) audio.hurt();
-    if (events & EV_PICKUP) audio.pickup();
-    if (events & EV_CASH) audio.cash();
-    if (events & EV_CRIME) audio.crime();
-    if (events & EV_JINGLE) audio.jingle();
-    if (events & EV_ENTER) audio.enter();
-  }
-
-  function afterStep(events) {
-    playEvents(events);
-    if (world.state.over === 'busted' && screen === SCREEN_PLAY) {
+  function enterEndScreen(kind) {
+    missions.onGameOver(world);
+    if (kind === 'busted') {
+      world.state.cash = Math.max(0, world.state.cash - BUST_FINE);
+      fineText = `Fine $${BUST_FINE} — released outside Palmira PD`;
       screen = SCREEN_BUSTED;
-      audio.busted();
-      audio.setEngine(false, 0);
-      audio.setSiren(0);
-      announce('Busted.');
-    } else if (world.state.over === 'wasted' && screen === SCREEN_PLAY) {
+      announce('Busted. The Palmira PD takes its fine and lets Rio walk.');
+    } else {
+      world.state.cash = Math.max(0, world.state.cash - WASTED_FEE);
+      fineText = `Hospital bill $${WASTED_FEE} — St. Azure patched Rio up`;
       screen = SCREEN_WASTED;
-      audio.wasted();
-      audio.setEngine(false, 0);
-      audio.setSiren(0);
-      announce('Wasted.');
+      announce('Wasted. Rio wakes up at St. Azure Hospital, lighter in the wallet.');
     }
-    // A finished job autosaves, and the next briefing follows once the banner has landed.
-    if (world.story.index !== lastStoryIndex) {
-      lastStoryIndex = world.story.index;
+  }
+
+  /** Menu navigation for the current screen; returns true when a menu consumed the frame. */
+  function runMenu(items, actions) {
+    const nav = input.takeNav();
+    if (nav !== 0) {
+      menuSelected = (menuSelected + nav + items.length) % items.length;
+      audio.click();
+    }
+    const hover = renderer.menuRects.find((r) => input.mouse.x >= r.x && input.mouse.x <= r.x + r.w
+      && input.mouse.y >= r.y && input.mouse.y <= r.y + r.h);
+    if (hover && hover.index !== menuSelected) menuSelected = hover.index;
+    if (actions & ACTION_CONFIRM) {
+      const item = items[hover ? hover.index : menuSelected];
+      if (item) activate(item.act);
+      return true;
+    }
+    return false;
+  }
+
+  function activate(act) {
+    audio.click();
+    if (screen === SCREEN_TITLE) {
+      if (act === 'new') newGame();
+      else if (act === 'continue') continueGame();
+      else if (act === 'howto') {
+        screen = SCREEN_HOWTO;
+        announce('How to play.');
+      }
+    } else if (screen === SCREEN_PAUSED) {
+      if (act === 'resume') {
+        screen = SCREEN_PLAY;
+        announce('Back on the street.');
+      } else if (act === 'save') {
+        writeSave();
+        hasSave = true;
+        announce('Game saved.');
+      } else if (act === 'restart') newGame();
+      else if (act === 'title') {
+        screen = SCREEN_TITLE;
+        menuSelected = 0;
+        announce('Palmira Heat.');
+      }
+    }
+  }
+
+  function playStep(actions) {
+    const ax = input.axes();
+    const driving = !!world.state.player.car;
+    const aim = renderer.toWorld(input.mouse.x, input.mouse.y);
+    const ctrl = {
+      mx: ax.x,
+      my: driving ? -ax.y : ax.y,
+      run: input.run(),
+      interact: !!(actions & ACTION_INTERACT),
+      fire: input.fire(),
+      aimX: aim.x,
+      aimY: aim.y,
+    };
+    let ev = world.step(STEP, ctrl);
+    const mres = missions.update(world, STEP);
+    ev |= mres.events;
+    if (ev & EVENT_SHOT) audio.shot();
+    if (ev & EVENT_OFFICER_SHOT) audio.officerShot();
+    if (ev & EVENT_PICKUP) audio.pickup();
+    if (ev & EVENT_CASH) audio.cash();
+    if (ev & EVENT_JINGLE) audio.jingle();
+    if (ev & EVENT_CRIME) audio.sting();
+    void (ev & EVENT_ENTER_CAR);
+    if (mres.completed) {
       writeSave();
-      save = readSave();
-      briefTimer = 2.6;
+      hasSave = true;
     }
-    if (screen === SCREEN_PLAY && !world.story.active && !world.story.complete && world.story.index < MISSIONS.length) {
-      briefTimer -= STEP;
-      if (briefTimer <= 0) showBrief();
-    } else if (world.story.active) {
-      briefTimer = 0;
-    }
+    if (ev & EVENT_BUSTED) enterEndScreen('busted');
+    else if (ev & EVENT_WASTED) enterEndScreen('wasted');
   }
 
   function frame(now) {
     requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+    let dt = (now - last) / 1000;
     last = now;
-    const actions = handleActions();
-    const stepping = screen === SCREEN_PLAY || screen === SCREEN_TITLE;
-    if (stepping) {
-      let first = true;
-      while (accumulator >= STEP && (screen === SCREEN_PLAY || screen === SCREEN_TITLE)) {
-        const events = world.step(STEP, screen === SCREEN_PLAY ? buildInput(actions, first) : BLANK);
-        first = false;
-        if (screen === SCREEN_PLAY) afterStep(events);
-        accumulator -= STEP;
+    if (dt > MAX_FRAME) dt = MAX_FRAME;
+    if (dt < 0) dt = 0;
+    const actions = input.takeActions();
+    if (actions & ACTION_MUTE) audio.toggleMute();
+
+    let items = null;
+    if (screen === SCREEN_TITLE) items = titleItems();
+    else if (screen === SCREEN_PAUSED) items = pauseItems();
+
+    if (screen === SCREEN_PAUSED && (actions & ACTION_PAUSE)) {
+      screen = SCREEN_PLAY;
+      announce('Back on the street.');
+    } else if (screen === SCREEN_TITLE || screen === SCREEN_PAUSED) {
+      runMenu(items, actions);
+    } else if (screen === SCREEN_HOWTO) {
+      if (actions & (ACTION_CONFIRM | ACTION_PAUSE)) {
+        screen = SCREEN_TITLE;
+        menuSelected = 0;
+        announce('Palmira Heat.');
       }
-    } else {
-      accumulator = 0;
+    } else if (screen === SCREEN_BUSTED || screen === SCREEN_WASTED) {
+      if (actions & ACTION_CONFIRM) {
+        world.respawn(screen === SCREEN_BUSTED ? 'busted' : 'wasted');
+        screen = SCREEN_PLAY;
+        announce('Back on the street.');
+      }
+    } else if (screen === SCREEN_PLAY) {
+      if (actions & ACTION_PAUSE) {
+        screen = SCREEN_PAUSED;
+        menuSelected = 0;
+        announce('Paused.');
+        items = pauseItems();
+      }
     }
-    // Continuous sounds follow the frame, not the step.
-    const p = world.state.player;
-    if (screen === SCREEN_PLAY && p.car) {
-      const top = { sedan: 430, sport: 560, taxi: 430, van: 360, police: 520, truck: 330 }[p.car.kind] || 430;
-      audio.setEngine(true, Math.abs(p.car.speed) / top);
-    } else {
-      audio.setEngine(false, 0);
-    }
-    let siren = 0;
-    if (screen === SCREEN_PLAY && world.state.wanted.stars > 0) {
-      let best = Infinity;
-      for (const c of world.state.cars) {
-        if (c.driver === 'police' || c.driver === 'policeParked') {
-          const d = Math.hypot(c.x - p.x, c.y - p.y);
-          if (d < best) best = d;
+
+    // Step the simulation: ambient on the menus, live in play, frozen when paused.
+    if (screen === SCREEN_PLAY && !(actions & ACTION_PAUSE)) {
+      acc += dt;
+      let first = true;
+      let guard = 0;
+      while (acc >= STEP && guard < 6) {
+        playStep(first ? actions : 0);
+        first = false;
+        acc -= STEP;
+        guard += 1;
+        if (screen !== SCREEN_PLAY) {
+          acc = 0;
+          break;
         }
       }
-      if (best < 700) siren = 1 - best / 700;
+      if (guard >= 6) acc = 0;
+    } else if (screen === SCREEN_TITLE || screen === SCREEN_HOWTO) {
+      acc += dt;
+      let guard = 0;
+      while (acc >= STEP && guard < 6) {
+        world.step(STEP, { mx: 0, my: 0, run: false, interact: false, fire: false, aimX: 0, aimY: 0 }, true);
+        acc -= STEP;
+        guard += 1;
+      }
+      if (guard >= 6) acc = 0;
     }
-    audio.setSiren(siren);
-    audio.setMusic(screen === SCREEN_TITLE);
 
-    const ui = { items: [], index: menuIndex, mouse: input.mousePos(), muted: audio.isMuted(), title: '', lines: [], reward: 0 };
-    if (screen === SCREEN_TITLE) ui.items = titleItems();
-    else if (screen === SCREEN_PAUSED) ui.items = PAUSE_ITEMS;
-    else if (screen === SCREEN_BRIEF && world.story.index < MISSIONS.length) {
-      const m = MISSIONS[world.story.index];
-      ui.title = m.title;
-      ui.lines = m.intro;
-      ui.reward = m.reward;
-    }
-    renderer.draw(world.state, screen, ui);
+    audio.update(world.state, screen, dt);
+    renderer.draw(world.state, screen, {
+      mouse: input.mouse,
+      muted: audio.muted,
+      menuItems: items ? items.map((i) => i.label) : [],
+      menuSelected,
+      fineText,
+    });
   }
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && screen === SCREEN_PLAY) {
       screen = SCREEN_PAUSED;
-      menuIndex = 0;
+      menuSelected = 0;
       announce('Paused.');
     }
   });
-  window.addEventListener('pointerdown', () => audio.unlock(), { once: false });
-
-  announce('Palmira Heat. Choose New Game to start.');
+  announce('Palmira Heat. A top-down open world.');
   requestAnimationFrame(frame);
 }
-
-if (shot) runShot(shot);
-else runGame();

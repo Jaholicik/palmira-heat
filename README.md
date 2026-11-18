@@ -1,82 +1,81 @@
 # Palmira Heat
 
-An original top-down open-world crime game in a single static web page — no build step, no
-assets, no network. Everything is drawn with canvas and synthesized with WebAudio.
+A top-down open-world crime game that runs entirely in the browser — no build step, no
+network requests, no assets beyond the code. You are **Rio Marino**, fresh off the boat
+in **Palmira**, a sun-bleached bay city of thirteen by ten blocks, and the fixer **Faro**
+has work for you.
 
-**The story.** Rio Marino steps off the boat in Palmira, a neon coastal city of palm avenues,
-docks and beachfront money, with nothing but a driver's hands. The fixer Faro starts feeding
-him work: lift a Comet coupe and keep it pretty, run a package across town hot, chase flags
-down the beachfront against the clock, cool off a three-star heat, and finally steal an
-armored van out from under the Palmira PD and deliver it to Pier 9. Five jobs tell the story;
-after that, the city is yours — taxi fares, respray runs and a wanted level that remembers
-everything the witnesses saw.
+Steal cars, run a five-job story chain, dodge a five-star wanted system with patrol cars
+that drive the streets to find you, work taxi fares between jobs, and watch the city
+change around you — morning glare, golden sunset, neon after dark.
 
 ## Run it
 
 ```sh
-node serve.ts            # serves game/ on http://localhost:8080
-# or: node serve.ts --port 8123
+node serve.ts
 ```
 
-Open the URL in a browser and choose **New Game**.
+Then open http://localhost:8080 — the whole game is the static files under `game/`.
 
 ## Controls
 
 | Input | Action |
 | --- | --- |
-| WASD / arrows | Walk (on foot) · accelerate, brake, steer (in a car) |
+| W A S D / arrows | Move / drive |
 | Shift | Run |
-| F or E | Enter / exit any car — stealing is a crime when witnessed |
-| Mouse + click / Space | Aim and fire the pistol (on foot) |
-| P or Esc | Pause — resume, save, restart |
-| M | Mute |
+| F or E | Enter / exit any car (parked, moving, or police) |
+| Mouse + click, or Space | Aim and fire the pistol |
+| Esc or P | Pause |
+| M | Sound on / off |
 
 ## What's in the city
 
-- **A living city**: a 13×10-block road grid with named districts, sidewalks, crosswalks and
-  stop lines, ~120 buildings with pseudo-3D roofs, water towers and AC units, storefront
-  signs (Café Sol, Club Neptune, Faro Records…) with striped awnings that burn neon at night,
-  palm trees swaying in the sea breeze, a beach with animated foam, moored boats off the
-  docks, shipping containers at Pier 9, a police station, St. Coastal hospital and the
-  Shine & Go respray garage.
-- **Traffic and people**: lane-following traffic that queues, yields and creeps around parked
-  cars; pedestrians who stroll the sidewalks, hail taxis, and flee gunfire and fast cars.
-- **Wanted system**: 0–5 stars from witnessed crime (theft, gunfire, knocking someone down,
-  hitting a patrol car). Police spawn scaled by stars, chase and ram; at 3+ stars officers
-  bail out and shoot. Get pinned while slow and the bust meter fills — BUSTED means a fine
-  and the cells at Palmira PD. Health at zero means WASTED and a hospital bill. Break police
-  sight to cool off, or slip into the respray bay unseen for $400.
-- **Five story missions** with phone-style briefings and popups, gold map markers, cash
-  rewards and a story-complete state — plus repeatable taxi fares (distance and speed pay).
-- **Day and night**: a full clock with golden-hour light, drifting cloud shadows, streetlight
-  pools, headlight cones and lit windows after dark.
-- **Sound, synthesized**: engine pitch follows speed, a two-tone siren swells as police
-  close in, gunshots, pickups, a mission-complete jingle, an original radio station announced
-  every time Rio gets into a car (Radio Onda 98.1, Club Neptune FM, Azure Wave Radio…), and a
-  title-screen music loop. M mutes. Audio only ever starts after a user gesture.
-- **Saves**: localStorage keeps cash, story progress, position and stats; the story autosaves
-  after every completed job, and Continue picks up where Rio left off.
+- **A living city** — 13×10 blocks across ten named districts, ~120 buildings with
+  storefronts and rooftop furniture, palm trees, docks with moored boats, a beach with
+  an animated shoreline, a police station, a hospital, a bank, and the Shine & Go
+  respray garage.
+- **Traffic and pedestrians** — lane-following traffic that yields and turns at
+  junctions, parked cars everywhere, and crowds that stroll, hail taxis, and scatter
+  when the shooting starts.
+- **The law** — a 0–5 star wanted level fed by witnessed crime. Patrol units route
+  across the street grid to reach you, ram you, and bail out to shoot at three stars
+  and up. Get cornered slow and you are BUSTED; lose them and the heat fades. The
+  respray wipes the slate for $400 — if no unit watches you roll in.
+- **A story** — five jobs from Faro: a specific car to steal and deliver, a package run
+  under heat, a timed beachfront checkpoint dash, a three-star escape, and an armored
+  van to take to Pier 9. Then free roam, with repeatable taxi fares.
+- **A full day** — a day/night cycle with a golden hour, lit windows, lamp pools,
+  headlight cones and neon that wakes up after dark, plus drifting cloud shadows.
+- **Sound, synthesized** — engine pitch that follows your speed, gunfire, sirens that
+  swell as units close in, and a title theme, all generated with WebAudio. Nothing
+  loads, nothing streams.
+
+Progress autosaves to localStorage after every job (and from the pause menu): cash,
+story progress, position, health, armor and stats.
 
 ## Architecture
 
-Plain static ES modules under `game/src/`, no dependencies:
+Plain ES modules under `game/src/`, no dependencies:
 
-- `world.js` — the whole simulation (city life, driving, police, wanted, gunplay, missions,
-  taxi, pickups, particles, clock). It advances in fixed `STEP = 1/60` steps from an input
-  struct and returns event flags; it knows nothing about screens or sound.
-- `city.js` — the seeded city build: road grid, districts, buildings, specials, solids.
-- `missions.js` — the five-job story chain as data plus a small state machine.
-- `render.js` — canvas drawing only: layered city, gradient-bodied cars with turning wheels
-  and brake lights, HUD, live minimap, screens. The camera follows with speed look-ahead and
-  eases its zoom out as Rio speeds up.
-- `shots.js` — deterministic screenshot staging behind `?shot=start|play|chase|end&seed=N`:
-  each scene plays the real simulation forward with autopilots (Rio really steals the car,
-  really commits the crimes that raise the stars, really gets busted).
-- `input.js`, `audio.js`, `main.js` — keyboard/mouse, the WebAudio synth (fully guarded
-  until a gesture unlocks it), and the boot/loop/screen state machine.
-- `random.js` — mulberry32. Every random decision in the simulation and staging comes from
-  the seeded RNG: the same seed always grows the same city and the same day.
+- `world.js` — the fixed-step (60 Hz) simulation: city life, driving, combat, the
+  wanted system, taxi fares, pickups. It returns event bit flags; it knows nothing
+  about drawing or sound. All randomness comes from one seeded stream, so any scene
+  replays identically.
+- `city.js` — the deterministic city build: blocks, buildings, specials, props.
+- `missions.js` — Faro's five-job story chain and its objectives, banners and pay.
+- `render.js` — the canvas renderer: world pass, night light pass, frosted-glass HUD
+  and minimap, menus and end screens.
+- `audio.js` — the guarded WebAudio synth; silent and harmless until a key press or
+  click unlocks it.
+- `input.js` — held axes plus one-shot action flags.
+- `shots.js` — screenshot staging: autopilots that play the real simulation into the
+  four cover scenes (title, mission drive, three-star chase, BUSTED).
+- `main.js` — boot, the live loop, screens, saving; also the `?shot=` capture mode.
+- `main.ts` (repo root) — the competition plumbing: copies `game/` and `screenshots/`
+  to the output directory and writes the dossier.
 
-`main.ts` packages the entry (copies `game/` and `screenshots/`, writes `dossier.json` via
-`vendor/makefun-game.ts`); `serve.ts` serves the game for local play; `shots.json` lists the
-four staged scenes that produced the screenshots in `screenshots/`.
+## Original IP
+
+Palmira, Rio Marino, Faro, and every business name, radio station and line of dialogue
+in this game are original creations written for it. Any resemblance to other games,
+cities or fixers is purely a matter of genre.

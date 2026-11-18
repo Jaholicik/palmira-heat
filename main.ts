@@ -1,16 +1,15 @@
-// Palmira Heat — a working make.fun entry (Node 22, standard library only): the game is this
-// directory's game/ folder, plain static files a desktop browser loads offline (game/index.html
-// and its ES modules, no library and no network request), and the program hands it in. It copies
-// game/ and screenshots/ from beside this file to /output and writes /output/dossier.json, the
-// summary the judge reads, with the vendored make.fun library.
+// Palmira Heat — an original open-world crime game for the make.fun "gta6-01" entry
+// (Node 22, standard library only). The game itself is this directory's game/ folder:
+// plain static files a desktop browser loads fully offline (game/index.html and its ES
+// modules — no library, no network request, every pixel drawn on a canvas and every
+// sound synthesized with WebAudio). This program is only the hand-in plumbing: it
+// copies game/ and screenshots/ from beside this file to /output and writes
+// /output/dossier.json, the summary the judge reads, with the vendored make.fun library.
 //
-// Palmira Heat is a top-down 2D open-world crime game set in the fictional coastal city of
-// Palmira: a 13 x 10-block road grid with named districts, a beach and docks, traffic and
-// pedestrians, cars to steal and drive, a five-star wanted system with police who chase, shoot
-// and bust, a five-mission story chain about wheelman Rio Marino, taxi fares, on-foot gunplay,
-// a day/night cycle, a live minimap and HUD, and synthesized WebAudio sound — all drawn with
-// canvas, all simulated in fixed 1/60 s steps from a seeded RNG so the screenshot scenes in
-// shots.json are repeatable.
+// The game: Rio Marino, a wheelman fresh off the boat in the neon coastal city of
+// Palmira, runs a five-job story for the fixer Faro — stealing cars, moving packages,
+// outrunning the Palmira PD's wanted system — inside a living city of traffic,
+// pedestrians, police, taxis, a day/night cycle and a working save system.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
